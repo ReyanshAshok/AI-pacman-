@@ -153,7 +153,7 @@ class PredictiveMazeGame:
         self.player_path = []
         self.start_time = time.time()
         
-        # Reset ghost trails
+        # Reset ghost trails    
         self.ghost_trails = {i: deque(maxlen=8) for i in range(len(self.ai_agent.ghosts))}
 
     def draw_ghost_trails(self):

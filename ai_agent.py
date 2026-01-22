@@ -40,6 +40,10 @@ class GreedyPredictiveAgent:
         
         # Ghost management
         self.ghosts = []
+        self.reinforcement_trigger_time = None  # When player first reached midpoint
+        self.first_reinforcement_spawned = False  # First reinforcement ghost
+        self.second_reinforcement_spawned = False  # Second reinforcement ghost
+        self.initial_ghost_count = 2  # Remember initial number of ghosts
         self.catch_radius = 1.0
         self.player_caught = False
         
@@ -51,10 +55,17 @@ class GreedyPredictiveAgent:
         self.directional_bias = defaultdict(int)
         self.position_choices = defaultdict(lambda: defaultdict(int))
         self.last_update_time = time.time()
+        
+        # Maze progression tracking
+        self.maze_midpoint = GRID_SIZE // 2
 
     def initialize_ghosts(self, maze, num_ghosts=2):
         """Initialize ghosts at strategic positions"""
         self.ghosts = []
+        self.initial_ghost_count = num_ghosts
+        self.reinforcement_trigger_time = None
+        self.first_reinforcement_spawned = False
+        self.second_reinforcement_spawned = False
         
         # Find good spawn positions away from player start and goal
         spawn_candidates = []
@@ -86,13 +97,111 @@ class GreedyPredictiveAgent:
             if self.is_position_accessible(x, y, maze):
                 spawn_candidates.append((x, y))
         
-        # Create ghosts
+        # Create initial ghosts
         selected_spawns = random.sample(spawn_candidates, min(num_ghosts, len(spawn_candidates)))
         for i, spawn_pos in enumerate(selected_spawns):
             ghost = PredictiveGhost(spawn_pos, i)
             self.ghosts.append(ghost)
 
+    def check_for_reinforcement_spawn(self, player_pos, maze):
+        """Check player progress and manage timed reinforcement spawning"""
+        px, py = player_pos
+        current_time = time.time()
+        
+        # Check if player has crossed the midpoint for the first time
+        progress_x = px >= self.maze_midpoint
+        progress_y = py >= self.maze_midpoint
+        
+        if ((progress_x and py >= GRID_SIZE // 3) or (progress_y and px >= GRID_SIZE // 3)):
+            # Player has reached the trigger zone
+            if self.reinforcement_trigger_time is None:
+                self.reinforcement_trigger_time = current_time
+                print("🎯 Player entered the danger zone! Reinforcements incoming...")
+                return False
+        
+        # If trigger time is set, check for timed spawns
+        if self.reinforcement_trigger_time is not None:
+            time_since_trigger = current_time - self.reinforcement_trigger_time
+            
+            # Spawn first reinforcement ghost immediately
+            if not self.first_reinforcement_spawned:
+                self.spawn_single_reinforcement_ghost(maze, 1)
+                self.first_reinforcement_spawned = True
+                return True
+            
+            # Spawn second reinforcement ghost after 30 seconds
+            elif time_since_trigger >= 10.0 and not self.second_reinforcement_spawned:
+                self.spawn_single_reinforcement_ghost(maze, 2)
+                self.second_reinforcement_spawned = True
+                return True
+        
+        return False
+
+    def spawn_single_reinforcement_ghost(self, maze, ghost_number):
+        """Spawn a single reinforcement ghost from the goal area"""
+        print(f"🚨 REINFORCEMENT GHOST #{ghost_number} SPAWNED! 🚨")
+        
+        # Start from goal position and find nearby accessible positions
+        goal_x, goal_y = maze.goal
+        spawn_candidates = []
+        
+        # Search in expanding rings around the goal
+        for radius in range(1, 5):  # Search up to 4 cells away
+            for dx in range(-radius, radius + 1):
+                for dy in range(-radius, radius + 1):
+                    if abs(dx) == radius or abs(dy) == radius:  # Only check perimeter
+                        x, y = goal_x + dx, goal_y + dy
+                        
+                        if (0 <= x < GRID_SIZE and 0 <= y < GRID_SIZE and 
+                            (x, y) != maze.goal and (x, y) != maze.start and
+                            self.is_position_accessible(x, y, maze)):
+                            
+                            # Check if position is not occupied by existing ghosts
+                            position_free = True
+                            for existing_ghost in self.ghosts:
+                                if existing_ghost.get_position() == (x, y):
+                                    position_free = False
+                                    break
+                            
+                            if position_free:
+                                spawn_candidates.append((x, y))
+            
+            # If we found candidates at this radius, use them
+            if spawn_candidates:
+                break
+        
+        # If no good positions found near goal, fall back to random positions
+        if not spawn_candidates:
+            for _ in range(20):  # Try 20 random positions
+                x = random.randint(self.maze_midpoint, GRID_SIZE - 1)
+                y = random.randint(self.maze_midpoint, GRID_SIZE - 1)
+                
+                if (self.is_position_accessible(x, y, maze) and 
+                    (x, y) != maze.goal and (x, y) not in [g.get_position() for g in self.ghosts]):
+                    spawn_candidates.append((x, y))
+        
+        # Spawn the ghost
+        if spawn_candidates:
+            spawn_pos = random.choice(spawn_candidates)
+            ghost_id = len(self.ghosts)
+            reinforcement_ghost = PredictiveGhost(spawn_pos, ghost_id)
+            reinforcement_ghost.chase_mode = "hunt"  # Start in aggressive hunt mode
+            self.ghosts.append(reinforcement_ghost)
+            
+            print(f"✅ Reinforcement ghost #{ghost_number} deployed at: {spawn_pos}")
+        else:
+            print("⚠️ Could not find suitable spawn position for reinforcement ghost!")
+
     def is_position_accessible(self, x, y, maze):
+        """Check if position has at least one open direction"""
+        if not (0 <= x < GRID_SIZE and 0 <= y < GRID_SIZE):
+            return False
+        
+        directions = ["top", "right", "bottom", "left"]
+        for direction in directions:
+            if not maze.grid[y][x][direction]:
+                return True
+        return False
         """Check if position has at least one open direction"""
         if not (0 <= x < GRID_SIZE and 0 <= y < GRID_SIZE):
             return False
@@ -330,12 +439,25 @@ class GreedyPredictiveAgent:
         if current_time - self.last_update_time < 0.4:  # Update every 0.4 seconds
             return
         
-        goal_pos = maze.goal
-        intercept_positions = self.calculate_intercept_positions(player_pos, goal_pos, maze)
+        # Check for reinforcement spawning (non-blocking)
+        self.check_for_reinforcement_spawn(player_pos, maze)
         
-        for i, ghost in enumerate(self.ghosts):
-            target_pos = intercept_positions[i]
-            self.move_ghost_toward_target(ghost, target_pos, maze)
+        # Continue with normal ghost updates
+        goal_pos = maze.goal
+        
+        # Only calculate intercepts if we have ghosts
+        if self.ghosts:
+            try:
+                intercept_positions = self.calculate_intercept_positions(player_pos, goal_pos, maze)
+                
+                for i, ghost in enumerate(self.ghosts):
+                    target_pos = intercept_positions[i] if i < len(intercept_positions) else player_pos
+                    self.move_ghost_toward_target(ghost, target_pos, maze)
+            except Exception as e:
+                # If intercept calculation fails, fall back to simple chase
+                print(f"Ghost update error: {e}")
+                for ghost in self.ghosts:
+                    self.move_ghost_toward_target(ghost, player_pos, maze)
         
         self.last_update_time = current_time
 
@@ -381,6 +503,10 @@ class GreedyPredictiveAgent:
         self.ghosts = []
         self.path_cache.clear()
         self.cache_timeout.clear()
+        # Reset all reinforcement tracking
+        self.reinforcement_trigger_time = None
+        self.first_reinforcement_spawned = False
+        self.second_reinforcement_spawned = False
 
     def get_prediction_info(self, player_pos, maze):
         """Get current prediction information for debugging/display"""
@@ -405,8 +531,21 @@ class GreedyPredictiveAgent:
 
     def get_learning_stats(self):
         """Get statistics about the AI's performance"""
+        reinforcement_status = "None"
+        if self.reinforcement_trigger_time is not None:
+            if self.second_reinforcement_spawned:
+                reinforcement_status = "Both Spawned"
+            elif self.first_reinforcement_spawned:
+                current_time = time.time()
+                time_left = max(0, 30.0 - (current_time - self.reinforcement_trigger_time))
+                reinforcement_status = f"Second in {time_left:.1f}s"
+            else:
+                reinforcement_status = "Triggered"
+        
         return {
             "active_ghosts": len(self.ghosts),
+            "initial_ghosts": self.initial_ghost_count,
+            "reinforcement_status": reinforcement_status,
             "patterns_learned": len(self.position_choices),
             "directional_preferences": dict(self.directional_bias),
             "cache_size": len(self.path_cache),
